@@ -132,7 +132,16 @@ def index():
             ranking = bm25_ranking
             scores = bm25_scores
 
+            # Determine maximum score for relative percentage normalization
+            max_score = scores[ranking[0]] if len(ranking) > 0 and scores[ranking[0]] > 0 else 1.0
+
             for idx in ranking:
+                raw_score = scores[idx]
+
+                # Stop iteration if score is 0
+                if raw_score <= 0:
+                    break
+
                 row = df_corpus.iloc[idx]
 
                 # Apply German Filter
@@ -144,6 +153,9 @@ def index():
                 if selected_exp != "All" and job_exp != selected_exp:
                     continue
 
+                # Calculate match percentage relative to highest score
+                match_percentage = (raw_score / max_score) * 100.0
+
                 results.append({
                     "title": row["title"],
                     "company": row["company"],
@@ -154,7 +166,7 @@ def index():
                     "requires_german": row["requires_german"],
                     "experience_level": job_exp,
                     "snippet": str(row["text_translated_en"])[:250] + "...",
-                    "score": f"{scores[idx]:.4f}"
+                    "score": f"{match_percentage:.1f}%"
                 })
                 if len(results) >= 20:
                     break
