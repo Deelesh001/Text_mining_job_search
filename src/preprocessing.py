@@ -1,6 +1,7 @@
 import os
 import re
 import ssl
+import time
 import urllib.request
 import pandas as pd
 from bs4 import BeautifulSoup
@@ -8,8 +9,7 @@ import langdetect
 import nltk
 from nltk.stem import WordNetLemmatizer
 from nltk.corpus import stopwords
-import argostranslate.package
-import argostranslate.translate
+from deep_translator import GoogleTranslator
 
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -35,27 +35,6 @@ RAW_PATH = os.path.join(BASE_DIR, "..", "data", "raw", "raw_jobs_snapshot.json")
 OUTPUT_DIR = os.path.join(BASE_DIR, "..", "data", "processed")
 OUTPUT_PATH = os.path.join(OUTPUT_DIR, "jobs.parquet")
 TRANSLATION_CACHE_PATH = os.path.join(OUTPUT_DIR, "translated_cache.parquet")
-
-
-def setup_translation():
-    installed = argostranslate.translate.load_installed_languages()
-    de_lang = next((x for x in installed if x.code == "de"), None)
-    en_lang = next((x for x in installed if x.code == "en"), None)
-    if de_lang and en_lang:
-        return de_lang.get_translation(en_lang)
-    try:
-        argostranslate.package.update_package_index()
-        packages = argostranslate.package.get_available_packages()
-        pkg = next((x for x in packages if x.from_code == "de" and x.to_code == "en"), None)
-        if pkg:
-            argostranslate.package.install_from_path(pkg.download())
-            installed = argostranslate.translate.load_installed_languages()
-            de_lang = next((x for x in installed if x.code == "de"), None)
-            en_lang = next((x for x in installed if x.code == "en"), None)
-    except Exception as e:
-        print(f"Translation model setup failed: {e}")
-        return None
-    return de_lang.get_translation(en_lang) if (de_lang and en_lang) else None
 
 
 def clean_html(text):
@@ -113,23 +92,42 @@ def classify_experience(text):
     return "Mid"
 
 
-def translate_corpus(df, translator):
+def translate_corpus(df):
     n_de = (df["lang"] == "de").sum()
     print(f"Language breakdown:\n{df['lang'].value_counts()}")
     print(f"Translating {n_de} German-tagged postings (snippet-only, 350 chars)...")
+    
+    translator = GoogleTranslator(source="de", target="en")
     translated = []
     count = 0
+    
     for _, row in df.iterrows():
-        if row["lang"] == "de" and translator and row["text_original"]:
-            try:
-                translated.append(translator.translate(row["text_original"][:350]))
-                count += 1
-                if count % 25 == 0:
-                    print(f"  Translated {count}/{n_de}")
-            except Exception:
+        if row["lang"] == "de" and row["text_original"]:
+            snippet = str(row["text_original"])[:350]
+            success = False
+            
+            # Retry logic with backoff for rate limits
+            for attempt in range(3):
+                try:
+                    res = translator.translate(snippet)
+                    translated.append(res if res else row["text_original"])
+                    success = True
+                    break
+                except Exception as e:
+                    time.sleep(1.5 * (attempt + 1))
+            
+            if not success:
                 translated.append(row["text_original"])
+                
+            count += 1
+            if count % 25 == 0:
+                print(f"  Translated {count}/{n_de}")
+            
+            # Brief delay between requests to remain within free rate limits
+            time.sleep(0.2)
         else:
             translated.append(row["text_original"])
+            
     df["text_translated_en"] = translated
     return df
 
@@ -174,8 +172,7 @@ def main():
         df["lang"] = df["text_original"].apply(get_lang)
         df["requires_german"] = df["text_original"].apply(check_german_req)
 
-        translator = setup_translation()
-        df = translate_corpus(df, translator)
+        df = translate_corpus(df)
 
         df.to_parquet(TRANSLATION_CACHE_PATH, index=False)
         print(f"Cached translated corpus to {TRANSLATION_CACHE_PATH}")
